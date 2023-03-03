@@ -1,0 +1,105 @@
+/* Library declaration*/
+let jose = require('jose');
+var util = require('util');
+
+/* Error code declaration */
+let encerrorcode = 'ARQ408';
+let ReqSignErrorCode = 'ARQ406';
+
+async function decryptMessage(reqpyld, mbbkey, ClientCert) {
+    try {
+        console.log('------------------------------------');
+        console.log(reqpyld);
+        console.log(mbbkey);
+
+        var jweObj = jose.parse(reqpyld);
+        jweObj.setKey(mbbkey);
+
+        let decrypteddata = await decryptJWE(jweObj)
+
+        console.warn('decrypteddata', decrypteddata);
+        if (!util.isNullOrUndefined(decrypteddata.errorCode)) {
+            return new Promise(function (resolve, reject) {
+                resolve(decrypteddata.errorCode)
+            })
+        }
+        session.output.write(decrypteddata.desc);
+
+        var jwsSignedObject = jose.parse(decrypteddata.desc);
+        
+        let validateJWSRes = await validateJWS(jwsSignedObject, ClientCert)
+
+        if (!util.isNullOrUndefined(validateJWSRes.errorCode)) {
+            return new Promise(function (resolve, reject) {
+                resolve(validateJWSRes.errorCode)
+            })
+        }
+
+        /* Get Payload from JWS SIgnature */
+        let jwsclaims = jwsSignedObject.getPayload();
+        let reqdata = JSON.parse(jwsclaims);
+
+        return new Promise(function (resolve, reject) {
+            resolve(reqdata)
+        })
+    } catch (e) {
+        console.error("Decryption Failed:" + e);
+        return new Promise(function (resolve, reject) {
+            resolve(encerrorcode)
+        })
+    }
+}
+
+module.exports.decryptMessage = decryptMessage;
+
+
+/* Decrypt the JWE Request message body*/
+function decryptJWE(jweObj) {
+    return new Promise(function (resolve, reject) {
+        jose.createJWEDecrypter(jweObj).decrypt('utf8', function (error, decrypteddata) {
+            if (error) {
+                console.error("Decryption Failed:" + error);
+                resolve({
+                    "errorCode": encerrorcode,
+                    "desc": error
+                })
+            } else {
+                resolve({
+                    "errorCode": null,
+                    "desc": decrypteddata
+                })
+            }
+        })
+    })
+}
+
+/* Validate JWS signature */
+function validateJWS(jwsSignedObject, key) {
+    return new Promise(function (resolve, reject) {
+        var signedJWSHeaders = jwsSignedObject.getSignatures();
+
+        for (var k = 0; k < signedJWSHeaders.length; k++) {
+            var hdr2 = signedJWSHeaders[k];
+            hdr2.setKey(key);
+        }
+
+        console.log('jwsSignedObject', jwsSignedObject)
+
+        var myVerifier = jose.createJWSVerifier(jwsSignedObject);
+        myVerifier.validate(function (error) {
+            if (error) {
+                console.error("Signature is invalid:" + error);
+                resolve({
+                    "errorCode": ReqSignErrorCode,
+                    "desc": error
+                })
+            } else {
+                resolve({
+                    "errorCode": null,
+                    "desc": ""
+                })
+            }
+        })
+    })
+}
+module.exports.validateJWS = validateJWS;

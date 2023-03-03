@@ -1,0 +1,259 @@
+/* Library declaration */
+/* For Cryptographic Library */
+var crypto = require('crypto');
+/* Headers */
+var hm = require('header-metadata');
+/* Service meta data */
+var service = require('service-metadata');
+/* File system library */
+var fs = require('fs');
+/* Utils Library */
+var util = require('util');
+/* Jose Library */
+let jose = require('jose');
+
+/* Initialize the Context Variable */
+var ct = session.name('api') || session.createContext('api');
+/* Common Properties taken from apigtw main service incoming request and reused in the mircro service - Start*/
+/* Look up is set apigtw entry service and reused here */
+let properties = hm.current.get('X-MB-lk');
+/* Lookup to use in Response & Error Handling */
+ct.setVar('X-MB-lk', hm.current.get('X-MB-lk'));
+/* Lookup entry indicator for this service */
+ct.setVar('X-MB-srvcind', hm.current.get('X-MB-srvcind'));
+ct.setVar('X-MB-E2E-ID', hm.current.get('X-MB-E2E-ID'));
+
+/* Common Properties taken from apigtw main service incoming request -End */
+let headerValidation = require('local://api2/common/validation/headerValidation.js');
+let timestampValidation = require('local://api2/common/validation/timestampValidation.js');
+let decryptionMessage = require('local://api2/common/validation/decryptionMessage.js');
+let tokenValidation = require('local://api2/common/validation/tokenValidation.js');
+let signatureValidation = require('local://api2/common/validation/signatureValidation.js');
+
+const readFile = util.promisify(fs.readAsJSON);
+
+async function initProgram() {
+    try {
+        const cf = await readFile(properties);
+        /* Declaration */
+        let contentType = hm.current.get('Content-Type');
+        console.log('contentType', contentType)
+        let reqdata
+        if (contentType == "application/json") {
+            reqdata = await readJSONInput()
+        } else {
+            reqdata = await readTextInput()
+        }
+
+        console.log * ('reqdata', reqdata)
+
+        /* Routing Details */
+        let i = hm.current.get('X-MB-srvcind');
+
+        /* Headers Verification */
+        let headerValidationFlag = cf.ServiceDetails[i].ValidationInfo.Header
+        console.log("headerValidationFlag", headerValidationFlag)
+        if (headerValidationFlag == "Y") {
+            let headerValidationRes = await headerValidation.checkingHeader(hm)
+            if (!util.isNullOrUndefined(headerValidationRes)) {
+                session.reject(headerValidationRes);
+                return
+            }
+        }
+
+        /* Timestamp Verification */
+        let timestampValidationFlag = cf.ServiceDetails[i].ValidationInfo.Timestamp
+        console.log("timestampValidationFlag", timestampValidationFlag)
+        if (timestampValidationFlag == "Y") {
+            let timestampValidationRes = await timestampValidation.checkingTimestamp(hm)
+            if (!util.isNullOrUndefined(timestampValidationRes)) {
+                session.reject(timestampValidationRes);
+                return
+            }
+        }
+        /* Descryption Validation */
+        let decryptionFlag = cf.ServiceDetails[i].ValidationInfo.Decrypt.Flag
+        console.log('decryptionFlag', decryptionFlag);
+        if (decryptionFlag == "Y") {
+            let mbbkey = cf.ServiceDetails[i].DecrptionInfo.MbbKey;
+            let ClientCert = cf.ServiceDetails[i].SignatureInfo.ClientCert;
+            let pattern = /ARQ/;
+
+            const decryptionVersion = !util.isNullOrUndefined(cf.ServiceDetails[i].ValidationInfo.Decrypt.Version) ? cf.ServiceDetails[i].ValidationInfo.Decrypt.Version : "v1"
+            
+            if (decryptionVersion == "v2") {
+                console.warn('testtesttest');
+                let xmbauthorization = hm.current.get('X-MB-Authorization');
+                var jwsSignedObject = jose.parse(xmbauthorization);
+                let validateJWSRes = await decryptionMessage.validateJWS(jwsSignedObject, mbbkey)
+
+                if (!util.isNullOrUndefined(validateJWSRes) && (util.isString(validateJWSRes) && pattern.test(validateJWSRes))) {
+                    session.reject(validateJWSRes);
+                    return
+                }
+            }
+
+            let decryptRes = await decryptionMessage.decryptMessage(reqdata, mbbkey, ClientCert)
+            console.warn('decryptRes', decryptRes);
+            
+            if (!util.isNullOrUndefined(decryptRes) && (util.isString(decryptRes) && pattern.test(decryptRes))) {
+                session.reject(decryptRes);
+                return
+            }
+            console.log("hahahahahahahahs");
+            reqdata = decryptRes
+        }
+
+
+        /* Token Validation */
+        /* Token Validation information header
+            v3 = authorisation
+            v2/v4 = not using authorisation
+        */
+        let tokenprofile = cf.ServiceDetails[i].TokenInfo.Profile;
+        let tokenendpoint = cf.ServiceDetails[i].TokenInfo.TokenEndpoint
+        let tokentimeout = Number(cf.ServiceDetails[i].TokenInfo.TokenTimeout);
+        var tknhdr = hm.current.get('X-MB-Authorization')
+        let tokenValidationFlag = cf.ServiceDetails[i].ValidationInfo.Token.Flag
+        console.log('tokenValidationFlag', tokenValidationFlag);
+        if (tokenValidationFlag == "Y") {
+            const tokenValidationVersion = !util.isNullOrUndefined(cf.ServiceDetails[i].ValidationInfo.Token.Version) ? cf.ServiceDetails[i].ValidationInfo.Token.Version : "v3"
+            let tokenValidationRes = await tokenValidation.mbbtokenvalidate(service.URI, tokenendpoint, tknhdr, tokentimeout, tokenprofile, tokenValidationVersion);
+            if (!util.isNullOrUndefined(tokenValidationRes)) {
+                session.reject(tokenValidationRes);
+                return
+            }
+        }
+
+        /* Signature Verification */
+        let signatureValidationFlag = cf.ServiceDetails[i].ValidationInfo.Signature.Flag
+        console.log('signatureValidationFlag', signatureValidationFlag);
+        if (signatureValidationFlag == "Y") {
+            const clientCredPath = !util.isNullOrUndefined(cf.ServiceDetails[i].ValidationInfo.Signature.ClientCertPath) ? cf.ServiceDetails[i].ValidationInfo.Signature.ClientCertPath : "local:/api2/oauth2/clientcred/v4/config/clientcredmanifest.json"
+            const clntinf = await readFile(clientCredPath);
+            /* Fetching the Client Cert based on the Clientid */
+            let clientidinput = hm.current.get('X-MB-Client-Id');
+            let clientid, clientcert;
+
+            let clientFound = clntinf.clients.find(el => {
+                return clientidinput == el.clientId
+            })
+
+            if (!util.isNullOrUndefined(clientFound)) {
+                clientid = clientFound.clientId
+                clientcert = clientFound.clientCert
+            } else {
+                console.error("The provided Client Id is not found or invalid: " + clientidinput);
+                session.reject('ARQ302');
+                return
+            }
+
+            /* HTTP METHOD , inbound url  , headers(X-MB-Client-Id,X-MB-Authorization,X-MB-Timestamp) + payload */
+            let signurl = cf.ServiceDetails[i].SignatureInfo.SignUrl
+            var signrequrl = signurl + service.URI
+
+            let signHeaderInput = hm.current.get('X-MB-Signed-Headers')
+            let splitHeaderInput = signHeaderInput.split(";");
+
+            let signhdr = ""
+            if (splitHeaderInput.length > 0) {
+                splitHeaderInput.forEach(el => {
+                    let tempSignhdr = `${el}=${hm.current.get(el)};`
+                    if (signhdr !== "") {
+                        signhdr = `${signhdr}${tempSignhdr}`
+                    } else {
+                        signhdr = `${tempSignhdr}`
+                    }
+                })
+            } else {
+                signhdr = 'X-MB-Client-Id=' + hm.current.get('X-MB-Client-Id') + ';' + 'X-MB-Authorization=' + hm.current.get('X-MB-Authorization') + ';' + 'X-MB-Timestamp=' + hm.current.get('X-MB-Timestamp') + ';';
+            }
+
+            // business API sign - required X-MB-Client-Id, X-MB-Authorization, X-MB-Timestamp
+            // token API sign - required X-MB-Timestamp
+
+            var signaturestring = 'POST;' + encodeURIComponent(signrequrl) + ';' + signhdr + JSON.stringify(reqdata);
+            // signaturestring = "20230215MBBEMYKL521OQR111192691.00RPPEMYKL99999999999"
+            console.log("API Signature Base String:" + signaturestring);
+
+            /*Signature Verification Info 
+                v1 = Transaction Type : Request 
+                v2 = Transaction Type : Response
+                v3 = Transaction Type : Request , Response 
+            */
+            const selectedVersion = !util.isNullOrUndefined(cf.ServiceDetails[i].ValidationInfo.Signature.Version) ? cf.ServiceDetails[i].ValidationInfo.Signature.Version : "v1"
+            const errorcode = "ARQ406"
+            let signatureAlgorithm = !util.isNullOrUndefined(cf.ServiceDetails[i].SignatureInfo.SignAlg) ? cf.ServiceDetails[i].SignatureInfo.SignAlg : "rsa-sha256"
+            let signatureValueFromRequest = hm.current.get('X-MB-Signature-Value')
+            let signatureValidationRes = await signatureValidation.rsaverifysign(selectedVersion, signatureAlgorithm, signaturestring, clientcert, signatureValueFromRequest, errorcode)
+
+            if (!util.isNullOrUndefined(signatureValidationRes)) {
+                session.reject(signatureValidationRes);
+                return
+            }
+
+            finalInitProgram(reqdata)
+        }
+
+        if (signatureValidationFlag == "N") {
+            finalInitProgram(reqdata)
+        }
+
+    } catch (error) {
+        console.error("Req Error:" + error);
+        session.reject('ARQ800');
+    }
+}
+
+function readJSONInput() {
+    return new Promise(function (resolve, reject) {
+        session.input.readAsJSON(function (readAsJSONError, reqdata) {
+            if (readAsJSONError) {
+                session.reject('ARQ401');
+                return
+            } else {
+                resolve(reqdata)
+            }
+        })
+    })
+}
+
+function readTextInput() {
+    return new Promise(function (resolve, reject) {
+        session.input.readAsBuffer(function (readAsJSONError, reqdata) {
+            if (readAsJSONError) {
+                session.reject('ARQ401');
+                return
+            } else {
+                resolve(reqdata)
+            }
+        })
+    })
+}
+
+function finalInitProgram(reqdata) {
+    session.output.write(reqdata);
+    /* Unique ID for setting in the response */
+    ct.setVar('X-MB-E2E-ID', hm.current.get('X-MB-E2E-ID'));
+    /* Header to Backend */
+    hm.current.set('Content-Type', 'application/json');
+
+    /* remove headers from inbound request */
+    hm.current.remove('X-MB-Authorization');
+    hm.current.remove('X-MB-Client-Id');
+    hm.current.remove('X-MB-Signature-Alg');
+    hm.current.remove('X-MB-Signature-Value');
+    hm.current.remove('X-MB-Signed-Headers');
+    hm.current.remove('X-MB-Timestamp');
+}
+
+try {
+    initProgram()
+}
+catch (e) {
+    /* Default Error - Gateway Unknown error */
+    console.error("Req Error,Unexpected error in the request:" + e);
+    session.reject('ARQ102');
+}
+
+
